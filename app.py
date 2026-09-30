@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     whatsapp_template_name: str = ""
     whatsapp_template_language: str = "en_US"
 
+    recaptcha_secret_key: str = ""
+
 logger = logging.getLogger("uvicorn.error")
 settings = Settings()
 
@@ -53,6 +55,7 @@ class ContactRequest(BaseModel):
     message: str = Field(default="", max_length=5000)
     consent: bool
     locale: Literal["en", "uk", "de", "he"] = "en"
+    captcha_token: str = Field(..., alias="captchaToken")
 
 
 async def send_email(payload: ContactRequest) -> bool:
@@ -145,6 +148,23 @@ async def send_whatsapp(payload: ContactRequest) -> bool:
     return True
 
 
+async def verify_recaptcha(token: str) -> bool:
+    if settings.app_env.lower() != "production" and not getattr(settings, "recaptcha_secret_key", None):
+        return True
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            "https://www.google.com/recaptcha/api/siteverify",
+            data={
+                "secret": settings.recaptcha_secret_key,
+                "response": token,
+            },
+            timeout=10.0,
+        )
+        data = response.json()
+        return data.get("success", False)
+
+
 @app.get("/api/ping")
 async def ping():
     return { "status": "ok" }
@@ -166,6 +186,13 @@ async def health():
 
 @app.post("/api/contact")
 async def contact(payload: ContactRequest):
+    if not payload.captcha_token:
+        raise HTTPException(status_code=400, detail="CAPTCHA token is missing")
+
+    is_captcha_valid = await verify_recaptcha(payload.captcha_token)
+    if not is_captcha_valid:
+        raise HTTPException(status_code=400, detail="Invalid CAPTCHA verification")
+
     if not payload.consent:
         raise HTTPException(status_code=422, detail="Consent is required")
 
